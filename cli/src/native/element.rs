@@ -630,11 +630,38 @@ async fn check_node_interception(
     Ok(())
 }
 
-/// Coordinates from DOM.getBoxModel are viewport-relative, and input events
-/// only land inside the viewport, so make sure the node is visible first.
-/// Best effort: a node that cannot be scrolled (display:none, detached) will
-/// fail in DOM.getBoxModel with a clearer error anyway.
+/// Coordinates from DOM.getBoxModel are viewport-relative. Center the node so
+/// persistent headers or footers do not intercept an otherwise visible target.
+/// Best effort: a detached node still fails in DOM.getBoxModel with a clearer
+/// error anyway.
 async fn scroll_node_into_view(client: &CdpClient, session_id: &str, backend_node_id: i64) {
+    let resolved: Result<DomResolveNodeResult, String> = client
+        .send_command_typed(
+            "DOM.resolveNode",
+            &DomResolveNodeParams {
+                backend_node_id: Some(backend_node_id),
+                node_id: None,
+                object_group: Some("agent-browser".to_string()),
+            },
+            Some(session_id),
+        )
+        .await;
+    if let Ok(resolved) = resolved {
+        if let Some(object_id) = resolved.object.object_id {
+            let _ = client
+                .send_command(
+                    "Runtime.callFunctionOn",
+                    Some(serde_json::json!({
+                        "objectId": object_id,
+                        "functionDeclaration": "function() { this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); }",
+                        "returnByValue": true,
+                    })),
+                    Some(session_id),
+                )
+                .await;
+            return;
+        }
+    }
     let _ = client
         .send_command(
             "DOM.scrollIntoViewIfNeeded",
@@ -930,23 +957,16 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
 
 fn build_selector_js(selector: &str) -> String {
     let find_expr = build_find_element_js(selector);
-    // Input events dispatch at viewport coordinates, so an element outside the
-    // viewport must be scrolled into view first or the click lands on nothing.
-    // The blocker check reports an overlay covering the click point instead of
-    // letting the input land on it and silently doing the wrong thing.
+    // Input events dispatch at viewport coordinates. Always center the target,
+    // including when it merely intersects the viewport: a fixed footer can
+    // otherwise cover an in-viewport target's center. The blocker check still
+    // rejects an overlay that cannot be avoided by scrolling.
     format!(
         r#"(() => {{
             const el = {find_expr};
             if (!el) return null;
-            const inView = (r) => r.width > 0 && r.height > 0 &&
-                r.bottom > 0 && r.right > 0 &&
-                r.top < (window.innerHeight || document.documentElement.clientHeight) &&
-                r.left < (window.innerWidth || document.documentElement.clientWidth);
-            let rect = el.getBoundingClientRect();
-            if (!inView(rect)) {{
-                el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
-                rect = el.getBoundingClientRect();
-            }}
+            el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
+            const rect = el.getBoundingClientRect();
             const x = rect.x + rect.width / 2;
             const y = rect.y + rect.height / 2;
             const blockerAt = {BLOCKER_AT_JS};
