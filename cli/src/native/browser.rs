@@ -1161,6 +1161,11 @@ impl BrowserManager {
                 .await?;
         }
 
+        // A full navigation can replace the renderer. Reinstall the managed
+        // page domains before accepting another native input command; focus
+        // emulation and `runIfWaitingForDebugger` both belong to that setup.
+        self.enable_domains(&session_id).await?;
+
         let page_url = self.get_url().await.unwrap_or_else(|_| url.to_string());
         let title = self.get_title().await.unwrap_or_default();
 
