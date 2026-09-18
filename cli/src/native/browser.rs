@@ -844,6 +844,20 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Network.enable", Some(session_id))
             .await?;
+        // CDP input events are ignored by some Chromium builds while an
+        // attached page is not considered focused, even after
+        // `Page.bringToFront`. Enable focus emulation for every managed page
+        // session so native mouse and keyboard input reaches the document.
+        // This domain is unavailable in a few CDP-compatible engines, so it
+        // remains best-effort like the optional WebMCP domain below.
+        let _ = self
+            .client
+            .send_command(
+                "Emulation.setFocusEmulationEnabled",
+                Some(json!({ "enabled": true })),
+                Some(session_id),
+            )
+            .await;
         let _ = self
             .client
             .send_command_no_params("WebMCP.enable", Some(session_id))
@@ -999,6 +1013,14 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Network.enable", None)
             .await?;
+        let _ = self
+            .client
+            .send_command(
+                "Emulation.setFocusEmulationEnabled",
+                Some(json!({ "enabled": true })),
+                None,
+            )
+            .await;
         let _ = self
             .client
             .send_command_no_params("WebMCP.enable", None)
@@ -3236,6 +3258,23 @@ mod tests {
                 assert_failed_external_initialization($method, $direct, $existing).await;
             }
         };
+    }
+
+    #[tokio::test]
+    async fn test_attached_page_enables_focus_emulation_for_native_input() {
+        let (url, server) = initialization_server("never-fail", true, 1, false).await;
+        let mut manager = BrowserManager::connect_cdp_inner(&url, false, None)
+            .await
+            .expect("connect");
+        manager.close().await.expect("close");
+
+        let methods = server.await.expect("server").pop().expect("connection");
+        assert!(
+            methods
+                .iter()
+                .any(|method| method == "Emulation.setFocusEmulationEnabled"),
+            "attached page setup must emulate focus before native input"
+        );
     }
 
     failed_initialization_test!(
